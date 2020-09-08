@@ -46,6 +46,8 @@ class TSGANSynthetiser:
         self.alternate = self.config['alternate']
         self.delta_lambda = self.config['delta_lambda']
         self.in_dim = self.nz + 1 if self.delta_condition else self.nz  
+        self.netG_path = self.config['netG_path']
+        self.netD_path = self.config['netD_path']
         self.dis_type = self.config['dis_type']
         self.gen_type = self.config['gen_type']
         self.lr = self.config['lr']
@@ -58,28 +60,8 @@ class TSGANSynthetiser:
         self.imf = self.config['imf']
         if writer: 
             self.writer=writer
-
-    def fit(self, dataset_path, ts_col, value_col, timew, normalize=True):
-        """Fit the CTSGAN Synthesizer models to the training data.
-        Args:
-            dataset_path (string): path to csv file
-            ts_col (string) : datetime column name
-            value_col (string): value column name
-            timew (int): number of points for building time sequencences
-            normalize (bool): whether to normalize the data in [-1,1]
-        """
-
-        self.dataset = TSDataset(csv_file=dataset_path, 
-                                timestamp_col=ts_col, 
-                                value_col=value_col, 
-                                time_window=timew, 
-                                normalize=True)
-        self.seq_len = timew   #same as the first dimension of a sequence in the dataset self.dataset[0].size(0)
-        dataloader = torch.utils.data.DataLoader(self.dataset, 
-                                                batch_size=self.batch_size, 
-                                                shuffle=True,
-                                                num_workers=int(self.workers))
-
+        
+        # Setting up the network
         if self.dis_type == "lstm": 
             self.netD = LSTMDiscriminator(in_dim=1, 
                                           hidden_dim=256).to(self.device)
@@ -100,12 +82,53 @@ class TSGANSynthetiser:
                                             n_channel=10, 
                                             kernel_size=8, 
                                             dropout=0.2).to(self.device)
-    
+
         assert self.netG
         assert self.netD
 
         print("|Discriminator Architecture|\n", self.netD)
         print("|Generator Architecture|\n", self.netG)
+
+        # Setting up the optimizer
+        self.optimizerD = optim.Adam(self.netD.parameters(), lr=self.lr)
+        self.optimizerG = optim.Adam(self.netG.parameters(), lr=self.lr) 
+
+        self.start_epoch = 0
+
+        if self.netG_path != '':
+            #self.netG.load_state_dict(torch.load(self.netG_path))   
+            self.netG, self.optimizerG, self.start_epoch = self.load_ckp(self.netG_path, self.netG, self.optimizerG) 
+            print(f'Generator loaded from epoch: {self.start_epoch -1}\n')
+        if self.netD_path != '':
+            #self.netD.load_state_dict(torch.load(self.netD_path))
+            self.netD, self.optimizerD, self.start_epoch = self.load_ckp(self.netD_path, self.netD, self.optimizerD)
+            print(f'Discriminator loaded from epoch: {self.start_epoch -1}\n')
+        
+
+        # Setting up the dataset
+        data_dir = self.config['dataset']['path']
+        filename = self.config['dataset']['filename']
+        path_file = data_dir + filename
+        datetime_col = self.config['dataset']['datetime_col']
+        value_col = self.config['dataset']['value_col']
+        time_window = self.config['dataset']['time_window'] 
+        self.seq_len = time_window   #same as the first dimension of a sequence in the dataset self.dataset[0].size(0) 
+        self.dataset = TSDataset(csv_file=path_file, 
+                                timestamp_col=datetime_col, 
+                                value_col=value_col, 
+                                time_window=time_window, 
+                                normalize=True)
+    
+    
+    def fit(self):
+        """Fit the CTSGAN Synthesizer models to the training data.
+        """
+
+        dataloader = torch.utils.data.DataLoader(self.dataset, 
+                                                batch_size=self.batch_size, 
+                                                shuffle=True,
+                                                num_workers=int(self.workers))
+
 
         criterion = nn.BCELoss().to(self.device)
         delta_criterion = nn.MSELoss().to(self.device)     
@@ -123,14 +146,11 @@ class TSGANSynthetiser:
 
         real_label = 1
         fake_label = 0
-
-        # setup optimizer
-        optimizerD = optim.Adam(self.netD.parameters(), lr=self.lr)
-        optimizerG = optim.Adam(self.netG.parameters(), lr=self.lr)  
-
-        print(f'Number of epochs {self.epochs}')
+ 
+        print(f'Starting epoch {self.start_epoch}')
+        print(f'Number of training epochs {self.epochs}')
         print(f'Length of the dataloader {len(dataloader)}')
-        for epoch in range(self.epochs):
+        for epoch in range(self.start_epoch, self.start_epoch+self.epochs):
             for i, data in enumerate(dataloader, 0):
                 #print(f'batch={i} batch_length={len(data)}, shape_batch={data.shape}')
                 niter = epoch * len(dataloader) + i
@@ -167,7 +187,7 @@ class TSGANSynthetiser:
                 errD_fake.backward()
                 D_G_z1 = output.mean().item()
                 errD = errD_real + errD_fake
-                optimizerD.step()
+                self.optimizerD.step()
                 
                 #Visualize discriminator gradients
                 if self.writer:
@@ -188,7 +208,7 @@ class TSGANSynthetiser:
                 if self.delta_condition:
                     #If option is passed, alternate between the losses instead of using their sum
                     if self.alternate:
-                        optimizerG.step()
+                        self.optimizerG.step()
                         self.netG.zero_grad()
                     noise = torch.randn(batch_size, seq_len, self.nz, device=self.device)
                     deltas = self.dataset.sample_deltas(batch_size).unsqueeze(2).repeat(1, seq_len, 1)
@@ -198,7 +218,7 @@ class TSGANSynthetiser:
                     delta_loss = self.delta_lambda * delta_criterion(out_seqs[:, -1] - out_seqs[:, 0], deltas[:,0])
                     delta_loss.backward()
                 
-                optimizerG.step()
+                self.optimizerG.step()
                 
                 #Visualize generator gradients
                 if self.writer:
@@ -211,7 +231,7 @@ class TSGANSynthetiser:
 
                 #Report metrics
                 print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f' 
-                    % (epoch, self.epochs, i, len(dataloader),
+                    % (epoch, self.start_epoch+self.epochs, i, len(dataloader),
                         errD.item(), errG.item(), D_x, D_G_z1, D_G_z2), end='')
                 if self.delta_condition and self.writer:
                     self.writer.add_scalar('MSE of deltas of generated sequences', delta_loss.item(), niter)
@@ -226,7 +246,7 @@ class TSGANSynthetiser:
             ##### End of the epoch #####
             real_plot = self.time_series_to_plot(self.dataset.denormalize(real_display))
             if self.writer:
-                if (epoch % self.tensorboard_image_every == 0) or (epoch == (self.epochs - 1)):
+                if (epoch % self.tensorboard_image_every == 0) or (epoch == (self.start_epoch + self.epochs -1)):
                     self.writer.add_image("Real", real_plot, epoch)
             
             fake = self.netG(fixed_noise)
@@ -240,30 +260,52 @@ class TSGANSynthetiser:
             im = Image.fromarray(ndarr)
             im.save(fp)
             if self.writer:
-                if (epoch % self.tensorboard_image_every == 0) or (epoch == (self.epochs - 1)):
+                if (epoch % self.tensorboard_image_every == 0) or (epoch == (self.start_epoch + self.epochs - 1)):
                     self.writer.add_image("Fake", fake_plot, epoch)
                                     
             # Checkpoint
-            if (epoch % self.checkpoint_every == 0) or (epoch == (self.epochs - 1)):
-                torch.save(self.netG, '%s/%s_netG_epoch_%d.pth' % (self.outf, self.run_tag, epoch))
-                torch.save(self.netD, '%s/%s_netD_epoch_%d.pth' % (self.outf, self.run_tag, epoch))
+            if (epoch % self.checkpoint_every == 0) or (epoch == (self.start_epoch + self.epochs - 1)):
+                self.save_ckp(self.netG, 'netG', self.optimizerG, epoch)
+                self.save_ckp(self.netD, 'netD', self.optimizerD, epoch)
+                #torch.save(self.netG, '%s/%s_netG_epoch_%d.pth' % (self.outf, self.run_tag, epoch))
+                #torch.save(self.netD, '%s/%s_netD_epoch_%d.pth' % (self.outf, self.run_tag, epoch))
 
+    def prepare_checkpoint(self, model, optimizer, epoch):
+        checkpoint = {
+            'epoch': epoch+1,
+            'state_dict': model.state_dict(),
+            'optimizer': optimizer.state_dict()
+        }
+        return checkpoint
 
-    def sample_data(self, n):
+    def save_ckp(self, model, modelname, optimizer, epoch):
+        path = '%s/%s_%s_epoch_%d.pth' % (self.outf, modelname, self.run_tag, epoch)
+        state = self.prepare_checkpoint(model, optimizer, epoch)
+        torch.save(state, path)
+
+    def load_ckp(self, path, model, optimizer):
+        checkpoint = torch.load(path)
+        model.load_state_dict(checkpoint['state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        return model, optimizer, checkpoint['epoch']
+
+    def sample_data(self):
         """Sample data similar to the training data.
         Args:
-            n (int):
-                Number of rows to sample.
+    
         Returns:
             numpy.ndarray or pandas.DataFrame
         """
 
-        self.delta_list = self.config['deltas']
+        delta_list = self.config['deltas']
+        n = self.config['size']
 
         #If conditional generation is required, then input for generator must contain deltas
-        if self.delta_list:
-            noise = torch.randn(len(self.delta_list), self.seq_len, self.nz) 
-            deltas = torch.FloatTensor(self.delta_list).view(-1, 1, 1).repeat(1, self.seq_len, 1)
+        if delta_list:
+            if len(delta_list)==1:
+                delta_list = delta_list * n
+            noise = torch.randn(len(delta_list), self.seq_len, self.nz) 
+            deltas = torch.FloatTensor(delta_list).view(-1, 1, 1).repeat(1, self.seq_len, 1)
             if self.dataset:
                 #Deltas are provided in original range, normalization required
                 deltas = self.dataset.normalize_deltas(deltas)

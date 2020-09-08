@@ -37,14 +37,16 @@ try:
 except OSError:
     pass
 
-data_dir = config['dataset']['path']
-filename = config['dataset']['filename']
-path_file = data_dir + filename
-datetime_col = config['dataset']['datetime_col']
-value_col = config['dataset']['value_col']
-time_window = config['dataset']['time_window']
+
+fit = config['fit']
+sample_new_data = config['sample_new_data']
 
 tsgan = TSGANSynthetiser(path_to_yaml, writer)
-tsgan.fit(path_file, datetime_col, value_col, time_window)
-n = config['size']
-sample = tsgan.sample_data(n)
+if fit:
+    print('****************************** Fitting ******************************')
+    tsgan.fit()
+elif sample_new_data:
+    print('****************************** Sampling ******************************')
+    sample = tsgan.sample_data()
+else:
+    print('****************************** No valid option selected ******************************')
