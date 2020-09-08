@@ -1,3 +1,5 @@
+fit : True
+sample_new_data : False
 dataset:
     class : ts
     path  : ./data/
@@ -11,8 +13,8 @@ nz: 100                             #dimensionality of the latent vector z
 epochs : 70                         #number of epochs to train for
 lr : 0.0002                         #learning rate
 cuda : True                         #enables cuda
-#netG :                             #path to netG (to continue training)
-#netD :                             #path to netD (to continue training)
+netG_path :    '' #'checkpoints/netG_test_CNN_dis_LSTM_gen_1hourtw_deltaminmax_epoch_35.pth'                        #path to netG (to continue training)
+netD_path :    '' #'checkpoints/netD_test_CNN_dis_LSTM_gen_1hourtw_deltaminmax_epoch_35.pth'                        #path to netD (to continue training)
 outf : checkpoints                  #folder to save checkpoints
 imf : images                        #folder to save images
 logdir : log                        #logdir for tensorboard
